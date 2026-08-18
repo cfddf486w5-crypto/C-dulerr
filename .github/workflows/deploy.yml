@@ -1,0 +1,59 @@
+name: Deploy to GitHub Pages
+
+on:
+  # Déclenche le déploiement à chaque push sur la branche main (ou master)
+  push:
+    branches: ["main", "master"]
+  # Permet de lancer le workflow manuellement depuis l'interface GitHub
+  workflow_dispatch:
+
+# Configuration des permissions nécessaires pour GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Permet d'annuler les déploiements en cours si un nouveau code est poussé
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: Compilation de l'application (Build)
+        # L'argument --base permet de dire à Vite et au plugin PWA de générer 
+        # les bons chemins relatifs pour les icônes et le manifest.webmanifest.
+        # Indispensable sur GitHub Pages car le site est souvent hébergé sous un sous-dossier (/nom-du-repo/)
+        run: npm run build -- --base=/${{ github.event.repository.name }}/
+
+      - name: Upload des artifacts (dossier dist)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+
+  deploy:
+    name: Deploy
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Déploiement sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
