@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { ContainerEntry, Proof, AppSettings, Tenant, User, ImportQueueItem, AppNotification } from '../types';
+import { db } from '../lib/firebase';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, query, orderBy, limit } from 'firebase/firestore';
 
 interface AppContextType {
   entries: ContainerEntry[];
@@ -71,50 +73,13 @@ const defaultTenant: Tenant = {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [entries, setEntries] = useState<ContainerEntry[]>(() => {
-    try {
-      const saved = localStorage.getItem('CONTAINER_SCHEDULE_ENTRIES_V1');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
-
-  const [proofs, setProofs] = useState<Proof[]>(() => {
-    try {
-      const saved = localStorage.getItem('CONTAINER_PROOFS_V1');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
-
-  const [settings, setSettings] = useState<AppSettings>(() => {
-    try {
-      const saved = localStorage.getItem('APP_FUNCTIONAL_SETTINGS_V1');
-      return saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
-    } catch { return defaultSettings; }
-  });
-
-  const [tenant, setTenant] = useState<Tenant>(() => {
-    try {
-      const saved = localStorage.getItem('APP_TENANT_V1');
-      const parsed = saved ? JSON.parse(saved) : null;
-      if (parsed) {
-        parsed.warehouses = parsed.warehouses.map((w: any) => ({
-          ...w,
-          id: w.id || `wh-${Math.random().toString(36).substring(2, 9)}`,
-          doors: w.doors || []
-        }));
-        return parsed;
-      }
-      return { ...defaultTenant, team: [] };
-    } catch { return { ...defaultTenant, team: [] }; }
-  });
-
-  const [importQueue, setImportQueueState] = useState<ImportQueueItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('CONTAINER_IMPORT_QUEUE_V1');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
-
+  const [entries, setEntries] = useState<ContainerEntry[]>([]);
+  const [proofs, setProofs] = useState<Proof[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [tenant, setTenant] = useState<Tenant>(defaultTenant);
+  const [importQueue, setImportQueueState] = useState<ImportQueueItem[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  
   const [user, setUser] = useState<User | null>({
     id: 'user-default-01',
     email: 'dispatch@entreprise.ca',
@@ -122,93 +87,143 @@ export function AppProvider({ children }: { children: ReactNode }) {
     role: 'admin'
   });
 
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => {
+  // --- Firestore Real-time Listeners ---
+  useEffect(() => {
+    // 1. Listen to Entries
+    const qEntries = query(collection(db, 'entries'));
+    const unsubscribeEntries = onSnapshot(qEntries, (snapshot) => {
+      const data: ContainerEntry[] = [];
+      snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() } as ContainerEntry));
+      setEntries(data);
+    });
+
+    // 2. Listen to Proofs
+    const qProofs = query(collection(db, 'proofs'));
+    const unsubscribeProofs = onSnapshot(qProofs, (snapshot) => {
+      const data: Proof[] = [];
+      snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() } as Proof));
+      setProofs(data);
+    });
+
+    // 3. Listen to Tenant config
+    const unsubscribeTenant = onSnapshot(doc(db, 'config', 'tenant-default-01'), (docSnap) => {
+      if (docSnap.exists()) {
+        const parsed = docSnap.data() as Tenant;
+        parsed.warehouses = parsed.warehouses.map((w: any) => ({
+          ...w,
+          id: w.id || `wh-${crypto.randomUUID().substring(0, 8)}`,
+          doors: w.doors || []
+        }));
+        setTenant(parsed);
+      } else {
+        // Init default tenant in DB if missing
+        setDoc(doc(db, 'config', 'tenant-default-01'), defaultTenant);
+      }
+    });
+
+    // 4. Listen to Settings (Stored per-tenant or global for now)
+    const unsubscribeSettings = onSnapshot(doc(db, 'config', 'global-settings'), (docSnap) => {
+      if (docSnap.exists()) {
+        setSettings({ ...defaultSettings, ...docSnap.data() });
+      }
+    });
+
+    // 5. Listen to Notifications
+    const qNotifs = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(50));
+    const unsubscribeNotifs = onSnapshot(qNotifs, (snapshot) => {
+      const data: AppNotification[] = [];
+      snapshot.forEach(doc => data.push({ id: doc.id, ...doc.data() } as AppNotification));
+      setNotifications(data);
+    });
+
+    return () => {
+      unsubscribeEntries();
+      unsubscribeProofs();
+      unsubscribeTenant();
+      unsubscribeSettings();
+      unsubscribeNotifs();
+    };
+  }, []);
+
+  // Sync settings body class
+  useEffect(() => {
+    if (settings.compactMode) document.body.classList.add('compact');
+    else document.body.classList.remove('compact');
+  }, [settings]);
+
+  // Sync local queue (keeps import queue in localStorage as it's transient per-device)
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem('APP_NOTIFICATIONS_V1');
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
-
-  useEffect(() => {
-    localStorage.setItem('CONTAINER_SCHEDULE_ENTRIES_V1', JSON.stringify(entries));
-  }, [entries]);
-
-  useEffect(() => {
-    localStorage.setItem('CONTAINER_PROOFS_V1', JSON.stringify(proofs));
-  }, [proofs]);
-
-  useEffect(() => {
-    localStorage.setItem('APP_TENANT_V1', JSON.stringify(tenant));
-  }, [tenant]);
+      const saved = localStorage.getItem('CONTAINER_IMPORT_QUEUE_V1');
+      if (saved) setImportQueueState(JSON.parse(saved));
+    } catch { /* ignore */ }
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('CONTAINER_IMPORT_QUEUE_V1', JSON.stringify(importQueue));
   }, [importQueue]);
 
-  useEffect(() => {
-    localStorage.setItem('APP_FUNCTIONAL_SETTINGS_V1', JSON.stringify(settings));
-    if (settings.compactMode) document.body.classList.add('compact');
-    else document.body.classList.remove('compact');
-  }, [settings]);
 
-  useEffect(() => {
-    localStorage.setItem('APP_NOTIFICATIONS_V1', JSON.stringify(notifications));
-  }, [notifications]);
+  // --- Write Actions ---
 
-  const addEntry = (entryData: Omit<ContainerEntry, 'id' | 'createdAt' | 'archivedAt' | 'imported'>) => {
+  const addEntry = async (entryData: Omit<ContainerEntry, 'id' | 'createdAt' | 'archivedAt' | 'imported'>) => {
+    const id = crypto.randomUUID();
     const newEntry: ContainerEntry = {
       ...entryData,
-      id: crypto.randomUUID(),
+      id,
       createdAt: new Date().toISOString(),
       archivedAt: null,
       imported: false,
     };
-    setEntries(prev => [...prev, newEntry]);
+    await setDoc(doc(db, 'entries', id), newEntry);
   };
 
-  const updateEntry = (id: string, updates: Partial<ContainerEntry>) => {
-    setEntries(prev => prev.map(e => e.id === id ? { ...e, ...updates } : e));
+  const updateEntry = async (id: string, updates: Partial<ContainerEntry>) => {
+    // Merge into Firestore
+    await setDoc(doc(db, 'entries', id), updates, { merge: true });
   };
 
-  const deleteEntry = (id: string) => {
-    setEntries(prev => prev.filter(e => e.id !== id));
+  const deleteEntry = async (id: string) => {
+    await deleteDoc(doc(db, 'entries', id));
   };
 
-  const addProof = (proofData: Omit<Proof, 'id'>) => {
+  const addProof = async (proofData: Omit<Proof, 'id'>) => {
+    const id = crypto.randomUUID();
     const newProof: Proof = {
       ...proofData,
-      id: crypto.randomUUID()
+      id
     };
-    setProofs(prev => [newProof, ...prev]);
-    // Marquer l'entrée comme archivée
-    updateEntry(proofData.containerId, { 
-      archivedAt: `${proofData.receivedDate} ${proofData.receivedTime}` 
+    await setDoc(doc(db, 'proofs', id), newProof);
+    // Mark entry as archived
+    await updateEntry(proofData.containerId, { 
+       archivedAt: `${proofData.receivedDate} ${proofData.receivedTime}` 
     });
   };
 
-  const updateSettings = (updates: Partial<AppSettings>) => {
-    setSettings(prev => ({ ...prev, ...updates }));
+  const updateSettings = async (updates: Partial<AppSettings>) => {
+    await setDoc(doc(db, 'config', 'global-settings'), updates, { merge: true });
   };
 
-  const updateTenant = (updates: Partial<Tenant>) => {
-    setTenant(prev => ({ ...prev, ...updates }));
+  const updateTenant = async (updates: Partial<Tenant>) => {
+    await setDoc(doc(db, 'config', 'tenant-default-01'), updates, { merge: true });
   };
 
   const setImportQueue = (queue: ImportQueueItem[]) => {
     setImportQueueState(queue);
   };
 
-  const addNotification = (message: string, type: 'info' | 'success' | 'warning' = 'info') => {
+  const addNotification = async (message: string, type: 'info' | 'success' | 'warning' = 'info') => {
+    const id = crypto.randomUUID();
     const newNotif: AppNotification = {
-      id: crypto.randomUUID(),
+      id,
       message,
       type,
       createdAt: new Date().toISOString(),
       read: false
     };
-    setNotifications(prev => [newNotif, ...prev].slice(0, 50)); // Keep last 50
+    
+    await setDoc(doc(db, 'notifications', id), newNotif);
 
-    // Trigger browser native notification if enabled and type is warning (urgent)
     if (type === 'warning' && settings.pushNotifications && typeof window !== 'undefined' && 'Notification' in window) {
       if (Notification.permission === 'granted') {
         new Notification('Alerte Logistique Urgente', { body: message, icon: '/favicon.ico' });
@@ -216,12 +231,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const markNotificationAsRead = (id: string) => {
-    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+  const markNotificationAsRead = async (id: string) => {
+    await setDoc(doc(db, 'notifications', id), { read: true }, { merge: true });
   };
 
   const clearNotifications = () => {
-    setNotifications([]);
+    // In a real app, we'd batch delete or query unread. 
+    // Here we just delete the current ones in state for simplicity.
+    notifications.forEach(async (n) => {
+      await deleteDoc(doc(db, 'notifications', n.id));
+    });
   };
 
   return (
