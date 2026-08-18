@@ -1,0 +1,6 @@
+{
+  "name": "Cédule de Conteneurs",
+  "description": "Application de gestion et de planification des horaires de conteneurs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
